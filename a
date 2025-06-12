@@ -1,0 +1,109 @@
+import os
+import gradio as gr
+from datetime import datetime
+from langchain_community.chat_models import ChatOpenAI
+from langchain.agents import initialize_agent, AgentType
+from langchain.schema import HumanMessage
+from langchain.tools import Tool
+
+# Configure for LM Studio (local model)
+# LM Studio typically runs on http://localhost:1234/v1 by default
+os.environ["OPENAI_API_KEY"] = "lm-studio"  # Dummy key, not actually used by LM Studio
+os.environ["OPENAI_API_BASE"] = "http://localhost:1234/v1"  # LM Studio local endpoint
+
+# === Tool 1: Get local time ===
+def get_local_time():
+    return datetime.now().strftime("🕒 %I:%M %p on %A, %B %d, %Y")
+
+time_tool = Tool(
+    name="Local Time Tool",
+    func=lambda _: get_local_time(),
+    description="Use this to find out the current local time."
+)
+
+# === Tool 2: Ask Local LLM ===
+def ask_local_llm(question: str) -> str:
+    local_llm = ChatOpenAI(
+        model="openhermes-2.5-mistral-7b",  # This will be the model loaded in LM Studio
+        temperature=0,
+    )
+    response = local_llm([HumanMessage(content=question)])
+    return response.content
+
+local_llm_tool = Tool(
+    name="Local LLM Helper",
+    func=ask_local_llm,
+    description="Use this to ask the local LLM directly about anything. Good for reasoning, advice, or explanations."
+)
+
+# === Main LLM with Streaming ===
+llm = ChatOpenAI(
+    model="local-model",  # This will be the model loaded in LM Studio
+    temperature=0,
+    streaming=True
+)
+
+# === Agent with tools ===
+agent = initialize_agent(
+    tools=[time_tool, local_llm_tool],
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    handle_parsing_errors=True,
+    verbose=True,
+    max_iterations=3,  # Limit iterations to prevent infinite loops
+    early_stopping_method="generate",  # Force generation of a final answer
+)
+
+# === Gradio UI ===
+def chat_with_agent_stream(message):
+    try:
+        # If the message starts with "Ask Local LLM:", bypass the agent and use the LLM directly
+        if message.lower().startswith("ask local llm:"):
+            query = message[len("Ask Local LLM:"):].strip()
+            yield f"Asking the local LLM: {query}\n\n"
+            response = ask_local_llm(query)
+            yield response
+            return
+        
+        # Otherwise, use the agent but only show the final answer
+        full_response = ""
+        last_observation = ""
+        
+        for chunk in agent.stream(message):
+            # Accumulate the full response
+            full_response += chunk
+            
+            # Check if we have a final answer
+            if "Final Answer:" in full_response:
+                # Extract just the final answer
+                final_answer = full_response.split("Final Answer:")[1].strip()
+                yield final_answer
+                return
+            
+            # Track the last observation as a fallback
+            if "Observation:" in full_response:
+                parts = full_response.split("Observation:")
+                if len(parts) > 1:
+                    last_observation = parts[-1].split("Thought:")[0].strip()
+            
+            # If we don't have a final answer yet, don't yield anything
+        
+        # If we never got a final answer but have an observation, return that
+        if last_observation:
+            yield last_observation
+        else:
+            # Direct query to the LLM as a last resort
+            yield ask_local_llm(message)
+    except Exception as e:
+        yield f"⚠️ Error: {e}"
+
+ui = gr.Interface(
+    fn=chat_with_agent_stream,
+    inputs=gr.Textbox(lines=2, placeholder="Ask anything or type 'Ask Local LLM: why is the sky blue?'"),
+    outputs="text",
+    title="AI DJ Prototype",
+    live=True,
+)
+
+if __name__ == "__main__":
+    ui.launch()
