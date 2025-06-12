@@ -1,0 +1,4 @@
+gradio>=4.0.0
+langchain>=0.0.267
+langchain-community>=0.0.1
+mutagen>=1.46.0
